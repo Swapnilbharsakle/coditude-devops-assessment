@@ -1,0 +1,23 @@
+name: Application Deployment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - 'backend/**'
+      - '.github/workflows/application.yml'
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate backend syntax
+        run: python -m py_compile backend/app.py
+      - name: Build backend image
+        run: docker build -t coditude-backend:ci backend
+      - name: Build frontend image
+        run: docker build -t coditude-frontend:ci frontend
+
+  # Cloud deployment will be added after the AWS infrastructure is validated.

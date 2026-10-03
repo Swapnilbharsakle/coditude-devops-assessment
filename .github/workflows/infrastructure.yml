@@ -1,0 +1,21 @@
+name: Infrastructure Deployment
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - '.github/workflows/infrastructure.yml'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate CloudFormation
+        run: |
+          pip install cfn-lint
+          cfn-lint infra/network.yaml
+
+      # AWS deployment will be added after repository OIDC and environment settings are configured.
