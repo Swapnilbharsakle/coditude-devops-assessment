@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudWatch monitoring resources for the Coditude assessment.
+
+Parameters:
+  AppEnvironment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  LoadBalancerFullName:
+    Type: String
+    Description: ALB full name from AWS/ApplicationELB/LoadBalancer metric dimension.
+
+Resources:
+  HighLoadAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alert when the application load balancer receives sustained high request volume.
+      Namespace: AWS/ApplicationELB
+      MetricName: RequestCount
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref LoadBalancerFullName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ApplicationLogMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub /ecs/coditude/${AppEnvironment}
+      FilterPattern: '?ERROR ?Error ?error'
+      MetricTransformations:
+        - MetricValue: '1'
+          MetricNamespace: Coditude/Application
+          MetricName: ErrorCount
+
+  ApplicationErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alert on application error log entries.
+      Namespace: Coditude/Application
+      MetricName: ErrorCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching

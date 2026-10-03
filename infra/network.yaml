@@ -1,14 +1,37 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Base VPC networking for the Coditude assessment.
+Description: >-
+  Production-oriented network foundation for the Coditude DevOps assessment.
+  Creates a multi-AZ VPC, public/private subnets, one NAT Gateway per AZ,
+  and security groups shared by the ALB, application workloads, and PostgreSQL.
 
 Parameters:
   AppEnvironment:
     Type: String
     Default: dev
-    AllowedValues: [dev, staging, prod]
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+
   VpcCidr:
     Type: String
     Default: 10.20.0.0/16
+
+  PublicSubnetACidr:
+    Type: String
+    Default: 10.20.1.0/24
+
+  PublicSubnetBCidr:
+    Type: String
+    Default: 10.20.2.0/24
+
+  PrivateSubnetACidr:
+    Type: String
+    Default: 10.20.11.0/24
+
+  PrivateSubnetBCidr:
+    Type: String
+    Default: 10.20.12.0/24
 
 Resources:
   VPC:
@@ -20,6 +43,10 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub coditude-${AppEnvironment}-vpc
+        - Key: Environment
+          Value: !Ref AppEnvironment
+        - Key: Project
+          Value: coditude-devops-assessment
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
@@ -38,48 +65,59 @@ Resources:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: 10.20.1.0/24
+      CidrBlock: !Ref PublicSubnetACidr
       AvailabilityZone: !Select [0, !GetAZs '']
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
           Value: !Sub coditude-${AppEnvironment}-public-a
+        - Key: Environment
+          Value: !Ref AppEnvironment
 
   PublicSubnetB:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: 10.20.2.0/24
+      CidrBlock: !Ref PublicSubnetBCidr
       AvailabilityZone: !Select [1, !GetAZs '']
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
           Value: !Sub coditude-${AppEnvironment}-public-b
+        - Key: Environment
+          Value: !Ref AppEnvironment
 
   PrivateSubnetA:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: 10.20.11.0/24
+      CidrBlock: !Ref PrivateSubnetACidr
       AvailabilityZone: !Select [0, !GetAZs '']
       Tags:
         - Key: Name
           Value: !Sub coditude-${AppEnvironment}-private-a
+        - Key: Environment
+          Value: !Ref AppEnvironment
 
   PrivateSubnetB:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: 10.20.12.0/24
+      CidrBlock: !Ref PrivateSubnetBCidr
       AvailabilityZone: !Select [1, !GetAZs '']
       Tags:
         - Key: Name
           Value: !Sub coditude-${AppEnvironment}-private-b
+        - Key: Environment
+          Value: !Ref AppEnvironment
 
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-public-rt
 
   DefaultPublicRoute:
     Type: AWS::EC2::Route
@@ -101,14 +139,194 @@ Resources:
       RouteTableId: !Ref PublicRouteTable
       SubnetId: !Ref PublicSubnetB
 
+  NatEipA:
+    Type: AWS::EC2::EIP
+    DependsOn: VpcIgwAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-nat-eip-a
+
+  NatEipB:
+    Type: AWS::EC2::EIP
+    DependsOn: VpcIgwAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-nat-eip-b
+
+  NatGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEipA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-nat-a
+
+  NatGatewayB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEipB.AllocationId
+      SubnetId: !Ref PublicSubnetB
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-nat-b
+
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-private-rt-a
+
+  PrivateRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-private-rt-b
+
+  PrivateDefaultRouteA:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayA
+
+  PrivateDefaultRouteB:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableB
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayB
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      SubnetId: !Ref PrivateSubnetA
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableB
+      SubnetId: !Ref PrivateSubnetB
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public HTTP/HTTPS access to the application load balancer.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-alb-sg
+        - Key: Environment
+          Value: !Ref AppEnvironment
+
+  ApplicationSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ECS tasks and non-containerized EC2 workloads.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-app-sg
+        - Key: Environment
+          Value: !Ref AppEnvironment
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL access from application workloads only.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref ApplicationSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-db-sg
+        - Key: Environment
+          Value: !Ref AppEnvironment
+
 Outputs:
   VpcId:
+    Description: VPC ID.
     Value: !Ref VPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VpcId
+
   PublicSubnetA:
+    Description: Public subnet in Availability Zone A.
     Value: !Ref PublicSubnetA
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnetA
+
   PublicSubnetB:
+    Description: Public subnet in Availability Zone B.
     Value: !Ref PublicSubnetB
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnetB
+
   PrivateSubnetA:
+    Description: Private subnet in Availability Zone A.
     Value: !Ref PrivateSubnetA
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnetA
+
   PrivateSubnetB:
+    Description: Private subnet in Availability Zone B.
     Value: !Ref PrivateSubnetB
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnetB
+
+  AlbSecurityGroupId:
+    Description: Security group attached to the public ALB.
+    Value: !Ref AlbSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-AlbSecurityGroupId
+
+  ApplicationSecurityGroupId:
+    Description: Security group for application workloads.
+    Value: !Ref ApplicationSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-ApplicationSecurityGroupId
+
+  DatabaseSecurityGroupId:
+    Description: Security group for PostgreSQL.
+    Value: !Ref DatabaseSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseSecurityGroupId

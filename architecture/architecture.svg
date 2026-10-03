@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760">
+  <style>
+    .box{fill:#f7f7f7;stroke:#222;stroke-width:2;rx:12;ry:12}
+    .title{font:700 20px Arial;fill:#111}
+    .text{font:15px Arial;fill:#222}
+    .small{font:13px Arial;fill:#444}
+    .line{stroke:#555;stroke-width:2;fill:none;marker-end:url(#arrow)}
+  </style>
+  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L10,3 L0,6 z" fill="#555"/></marker></defs>
+  <text x="600" y="35" text-anchor="middle" class="title">Coditude DevOps Assessment — AWS Production Architecture</text>
+
+  <rect x="70" y="70" width="170" height="70" class="box"/>
+  <text x="155" y="100" text-anchor="middle" class="title">Users</text>
+  <text x="155" y="123" text-anchor="middle" class="small">Internet</text>
+
+  <rect x="300" y="70" width="170" height="70" class="box"/>
+  <text x="385" y="100" text-anchor="middle" class="title">Route 53</text>
+  <text x="385" y="123" text-anchor="middle" class="small">DNS</text>
+
+  <rect x="530" y="70" width="170" height="70" class="box"/>
+  <text x="615" y="100" text-anchor="middle" class="title">CloudFront</text>
+  <text x="615" y="123" text-anchor="middle" class="small">CDN / Edge</text>
+
+  <rect x="760" y="70" width="170" height="70" class="box"/>
+  <text x="845" y="100" text-anchor="middle" class="title">ALB</text>
+  <text x="845" y="123" text-anchor="middle" class="small">Public entry point</text>
+
+  <path d="M240 105 H300" class="line"/><path d="M470 105 H530" class="line"/><path d="M700 105 H760" class="line"/>
+
+  <rect x="55" y="205" width="1090" height="450" fill="none" stroke="#777" stroke-width="2" rx="18"/>
+  <text x="80" y="235" class="title">AWS VPC — 10.20.0.0/16</text>
+
+  <rect x="85" y="265" width="330" height="145" class="box"/>
+  <text x="250" y="295" text-anchor="middle" class="title">Public Subnets (2 AZs)</text>
+  <text x="105" y="325" class="text">• Application Load Balancer</text>
+  <text x="105" y="350" class="text">• NAT Gateway per AZ</text>
+  <text x="105" y="375" class="text">• Internet Gateway route</text>
+
+  <rect x="455" y="265" width="330" height="145" class="box"/>
+  <text x="620" y="295" text-anchor="middle" class="title">Private App Subnets</text>
+  <text x="475" y="325" class="text">• ECS/Fargate frontend</text>
+  <text x="475" y="350" class="text">• ECS/Fargate backend</text>
+  <text x="475" y="375" class="text">• Alternative EC2 ASGs</text>
+
+  <rect x="825" y="265" width="290" height="145" class="box"/>
+  <text x="970" y="295" text-anchor="middle" class="title">Private DB Subnets</text>
+  <text x="845" y="325" class="text">• RDS PostgreSQL</text>
+  <text x="845" y="350" class="text">• Multi-AZ</text>
+  <text x="845" y="375" class="text">• Encrypted / backups</text>
+
+  <path d="M845 140 V265" class="line"/>
+  <path d="M620 410 V465" class="line"/>
+  <path d="M970 410 V465" class="line"/>
+
+  <rect x="180" y="465" width="270" height="110" class="box"/>
+  <text x="315" y="495" text-anchor="middle" class="title">Security</text>
+  <text x="200" y="525" class="text">IAM • Security Groups</text>
+  <text x="200" y="550" class="text">Secrets Manager • ECR scanning</text>
+
+  <rect x="470" y="465" width="270" height="110" class="box"/>
+  <text x="605" y="495" text-anchor="middle" class="title">Observability</text>
+  <text x="490" y="525" class="text">CloudWatch Logs / Metrics</text>
+  <text x="490" y="550" class="text">Container Insights / Alarms</text>
+
+  <rect x="760" y="465" width="270" height="110" class="box"/>
+  <text x="895" y="495" text-anchor="middle" class="title">CI/CD</text>
+  <text x="780" y="525" class="text">GitHub Actions + OIDC</text>
+  <text x="780" y="550" class="text">App and Infra pipelines separated</text>
+
+  <text x="600" y="705" text-anchor="middle" class="small">Containerized: ECR → ECS/Fargate | Non-containerized: EC2 Auto Scaling Groups</text>
+</svg>

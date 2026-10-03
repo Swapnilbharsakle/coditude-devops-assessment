@@ -1,0 +1,420 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Containerized production deployment for the Coditude assessment. Creates ECR,
+  ECS/Fargate services, an internet-facing ALB, CloudWatch logs, IAM roles and
+  service autoscaling. Application images are supplied by the application pipeline.
+
+Parameters:
+  AppEnvironment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  NetworkStackName:
+    Type: String
+    Description: Network stack name created from infra/network.yaml.
+
+  DatabaseStackName:
+    Type: String
+    Description: Database stack name created from infra/database.yaml.
+
+  FrontendImageTag:
+    Type: String
+    Default: latest
+
+  BackendImageTag:
+    Type: String
+    Default: latest
+
+  FrontendCpu:
+    Type: Number
+    Default: 256
+
+  FrontendMemory:
+    Type: Number
+    Default: 512
+
+  BackendCpu:
+    Type: Number
+    Default: 256
+
+  BackendMemory:
+    Type: Number
+    Default: 512
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+
+Resources:
+  FrontendRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub coditude/${AppEnvironment}/frontend
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Retain the newest 10 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}'
+
+  BackendRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub coditude/${AppEnvironment}/backend
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Retain the newest 10 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}'
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub coditude-${AppEnvironment}
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Environment
+          Value: !Ref AppEnvironment
+        - Key: Project
+          Value: coditude-devops-assessment
+
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/coditude/${AppEnvironment}
+      RetentionInDays: 30
+
+  ECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub coditude-${AppEnvironment}-ecs-execution
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadDatabaseSecretForTaskStartup
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  Fn::ImportValue:
+                    Fn::Sub: ${DatabaseStackName}-DatabaseSecretArn
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub coditude-${AppEnvironment}-ecs-task
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadDatabaseSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  Fn::ImportValue:
+                    Fn::Sub: ${DatabaseStackName}-DatabaseSecretArn
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub coditude-${AppEnvironment}-alb
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - Fn::ImportValue:
+            Fn::Sub: ${NetworkStackName}-AlbSecurityGroupId
+      Subnets:
+        - Fn::ImportValue:
+            Fn::Sub: ${NetworkStackName}-PublicSubnetA
+        - Fn::ImportValue:
+            Fn::Sub: ${NetworkStackName}-PublicSubnetB
+
+  FrontendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: ip
+      Port: 3000
+      Protocol: HTTP
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: ${NetworkStackName}-VpcId
+      HealthCheckEnabled: true
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckIntervalSeconds: 30
+      Matcher:
+        HttpCode: '200-399'
+
+  BackendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: ip
+      Port: 8000
+      Protocol: HTTP
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: ${NetworkStackName}-VpcId
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckIntervalSeconds: 30
+      Matcher:
+        HttpCode: '200'
+
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref FrontendTargetGroup
+
+  BackendListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HTTPListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: ['/api/*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
+
+  FrontendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub coditude-${AppEnvironment}-frontend
+      Cpu: !Ref FrontendCpu
+      Memory: !Ref FrontendMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: frontend
+          Image: !Sub '${FrontendRepository.RepositoryUri}:${FrontendImageTag}'
+          Essential: true
+          PortMappings:
+            - ContainerPort: 3000
+              Protocol: tcp
+          Environment:
+            - Name: NODE_ENV
+              Value: production
+            - Name: NEXT_PUBLIC_API_URL
+              Value: /api
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: frontend
+
+  BackendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub coditude-${AppEnvironment}-backend
+      Cpu: !Ref BackendCpu
+      Memory: !Ref BackendMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Sub '${BackendRepository.RepositoryUri}:${BackendImageTag}'
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          Environment:
+            - Name: APP_ENV
+              Value: !Ref AppEnvironment
+            - Name: DATABASE_HOST
+              Value:
+                Fn::ImportValue:
+                  Fn::Sub: ${DatabaseStackName}-DBEndpoint
+            - Name: DATABASE_PORT
+              Value: '5432'
+          Secrets:
+            - Name: DATABASE_USER
+              ValueFrom:
+                Fn::Sub:
+                  - '${SecretArn}:username::'
+                  - SecretArn:
+                      Fn::ImportValue:
+                        Fn::Sub: ${DatabaseStackName}-DatabaseSecretArn
+            - Name: DATABASE_PASSWORD
+              ValueFrom:
+                Fn::Sub:
+                  - '${SecretArn}:password::'
+                  - SecretArn:
+                      Fn::ImportValue:
+                        Fn::Sub: ${DatabaseStackName}-DatabaseSecretArn
+            - Name: DATABASE_NAME
+              ValueFrom:
+                Fn::Sub:
+                  - '${SecretArn}:dbname::'
+                  - SecretArn:
+                      Fn::ImportValue:
+                        Fn::Sub: ${DatabaseStackName}-DatabaseSecretArn
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: backend
+
+  FrontendService:
+    Type: AWS::ECS::Service
+    DependsOn: HTTPListener
+    Properties:
+      ServiceName: !Sub coditude-${AppEnvironment}-frontend
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref FrontendTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue:
+                Fn::Sub: ${NetworkStackName}-ApplicationSecurityGroupId
+          Subnets:
+            - Fn::ImportValue:
+                Fn::Sub: ${NetworkStackName}-PrivateSubnetA
+            - Fn::ImportValue:
+                Fn::Sub: ${NetworkStackName}-PrivateSubnetB
+      LoadBalancers:
+        - ContainerName: frontend
+          ContainerPort: 3000
+          TargetGroupArn: !Ref FrontendTargetGroup
+
+  BackendService:
+    Type: AWS::ECS::Service
+    DependsOn: BackendListenerRule
+    Properties:
+      ServiceName: !Sub coditude-${AppEnvironment}-backend
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref BackendTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue:
+                Fn::Sub: ${NetworkStackName}-ApplicationSecurityGroupId
+          Subnets:
+            - Fn::ImportValue:
+                Fn::Sub: ${NetworkStackName}-PrivateSubnetA
+            - Fn::ImportValue:
+                Fn::Sub: ${NetworkStackName}-PrivateSubnetB
+      LoadBalancers:
+        - ContainerName: backend
+          ContainerPort: 8000
+          TargetGroupArn: !Ref BackendTargetGroup
+
+  FrontendScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 4
+      MinCapacity: 1
+      ResourceId: !Sub service/${ECSCluster}/coditude-${AppEnvironment}-frontend
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  FrontendScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub coditude-${AppEnvironment}-frontend-cpu
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref FrontendScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 120
+        ScaleOutCooldown: 60
+
+  BackendScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 4
+      MinCapacity: 1
+      ResourceId: !Sub service/${ECSCluster}/coditude-${AppEnvironment}-backend
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  BackendScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub coditude-${AppEnvironment}-backend-cpu
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref BackendScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 120
+        ScaleOutCooldown: 60
+
+Outputs:
+  LoadBalancerDNS:
+    Description: Application URL endpoint.
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  LoadBalancerFullName:
+    Description: ALB full name used by CloudWatch metrics.
+    Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+
+  FrontendRepositoryUri:
+    Description: ECR repository for the Next.js frontend.
+    Value: !GetAtt FrontendRepository.RepositoryUri
+
+  BackendRepositoryUri:
+    Description: ECR repository for the Python backend.
+    Value: !GetAtt BackendRepository.RepositoryUri
+
+  ECSClusterName:
+    Description: ECS cluster name.
+    Value: !Ref ECSCluster

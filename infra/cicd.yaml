@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Optional AWS-native CI/CD support for the Coditude assessment. GitHub Actions
+  remains the trigger/orchestrator while CodeBuild provides a reproducible AWS
+  build environment for CI validation.
+
+Parameters:
+  AppEnvironment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  GitHubRepositoryUrl:
+    Type: String
+    Default: https://github.com/Swapnilbharsakle/coditude-devops-assessment
+
+Resources:
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub coditude-${AppEnvironment}-codebuild
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildLogsAndEcr
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: '*'
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub coditude-${AppEnvironment}-build
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Source:
+        Type: GITHUB
+        Location: !Ref GitHubRepositoryUrl
+        GitCloneDepth: 1
+        BuildSpec: .github/codebuild/buildspec.yml
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
+        Type: LINUX_CONTAINER
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: APP_ENV
+            Value: !Ref AppEnvironment
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Sub /codebuild/coditude/${AppEnvironment}
+          StreamName: build
+          Status: ENABLED
+
+Outputs:
+  CodeBuildProjectName:
+    Value: !Ref CodeBuildProject

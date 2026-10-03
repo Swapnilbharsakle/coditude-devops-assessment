@@ -1,0 +1,22 @@
+[
+  {
+    "ParameterKey": "AppEnvironment",
+    "ParameterValue": "dev"
+  },
+  {
+    "ParameterKey": "NetworkStackName",
+    "ParameterValue": "coditude-dev-network-dev"
+  },
+  {
+    "ParameterKey": "DBName",
+    "ParameterValue": "appdb"
+  },
+  {
+    "ParameterKey": "DBInstanceClass",
+    "ParameterValue": "db.t4g.micro"
+  },
+  {
+    "ParameterKey": "AllocatedStorage",
+    "ParameterValue": "20"
+  }
+]

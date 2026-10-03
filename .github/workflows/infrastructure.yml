@@ -1,21 +1,137 @@
-name: Infrastructure Deployment
+name: Infrastructure CI/CD
 
 on:
-  workflow_dispatch:
   push:
     branches: [main]
     paths:
       - 'infra/**'
       - '.github/workflows/infrastructure.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+        default: dev
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+  AWS_DEPLOY_ENABLED: ${{ vars.AWS_DEPLOY_ENABLED || 'false' }}
+  ENVIRONMENT: ${{ inputs.environment || vars.ENVIRONMENT || 'dev' }}
 
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate CloudFormation
-        run: |
-          pip install cfn-lint
-          cfn-lint infra/network.yaml
 
-      # AWS deployment will be added after repository OIDC and environment settings are configured.
+      - name: Install cfn-lint
+        run: pip install cfn-lint
+
+      - name: Validate CloudFormation templates
+        run: |
+          for file in infra/*.yaml; do
+            echo "Validating $file"
+            cfn-lint "$file"
+          done
+
+  deploy:
+    needs: validate
+    if: ${{ vars.AWS_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    environment: ${{ env.ENVIRONMENT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+
+      - name: Deploy network
+        run: |
+          aws cloudformation deploy \
+            --template-file infra/network.yaml \
+            --stack-name coditude-network-${ENVIRONMENT} \
+            --parameter-overrides AppEnvironment=${ENVIRONMENT} \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy database
+        run: |
+          aws cloudformation deploy \
+            --template-file infra/database.yaml \
+            --stack-name coditude-database-${ENVIRONMENT} \
+            --parameter-overrides \
+              AppEnvironment=${ENVIRONMENT} \
+              NetworkStackName=coditude-network-${ENVIRONMENT} \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy ECS infrastructure
+        run: |
+          aws cloudformation deploy \
+            --template-file infra/ecs.yaml \
+            --stack-name coditude-ecs-${ENVIRONMENT} \
+            --parameter-overrides \
+              AppEnvironment=${ENVIRONMENT} \
+              NetworkStackName=coditude-network-${ENVIRONMENT} \
+              DatabaseStackName=coditude-database-${ENVIRONMENT} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy non-containerized alternative
+        if: ${{ vars.DEPLOY_EC2_ALTERNATIVE == 'true' }}
+        run: |
+          SECRET_ARN=$(aws cloudformation describe-stacks \
+            --stack-name coditude-database-${ENVIRONMENT} \
+            --query "Stacks[0].Outputs[?OutputKey=='DatabaseSecretArn'].OutputValue" \
+            --output text)
+          DB_ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name coditude-database-${ENVIRONMENT} \
+            --query "Stacks[0].Outputs[?OutputKey=='DBEndpoint'].OutputValue" \
+            --output text)
+          aws cloudformation deploy \
+            --template-file infra/ec2.yaml \
+            --stack-name coditude-ec2-${ENVIRONMENT} \
+            --parameter-overrides \
+              AppEnvironment=${ENVIRONMENT} \
+              NetworkStackName=coditude-network-${ENVIRONMENT} \
+              DatabaseStackName=coditude-database-${ENVIRONMENT} \
+              DatabaseSecretArn=${SECRET_ARN} \
+              DatabaseEndpoint=${DB_ENDPOINT} \
+              AmiId=${{ vars.EC2_AMI_ID }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy AWS-native CodeBuild project
+        run: |
+          aws cloudformation deploy \
+            --template-file infra/cicd.yaml \
+            --stack-name coditude-cicd-${ENVIRONMENT} \
+            --parameter-overrides AppEnvironment=${ENVIRONMENT} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Read ALB metric dimension
+        id: alb
+        run: |
+          FULL_NAME=$(aws cloudformation describe-stacks \
+            --stack-name coditude-ecs-${ENVIRONMENT} \
+            --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerFullName'].OutputValue" \
+            --output text)
+          echo "full_name=$FULL_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy monitoring
+        run: |
+          aws cloudformation deploy \
+            --template-file infra/monitoring.yaml \
+            --stack-name coditude-monitoring-${ENVIRONMENT} \
+            --parameter-overrides \
+              AppEnvironment=${ENVIRONMENT} \
+              LoadBalancerFullName=${{ steps.alb.outputs.full_name }} \
+            --no-fail-on-empty-changeset

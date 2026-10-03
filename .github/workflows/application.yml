@@ -1,4 +1,4 @@
-name: Application Deployment
+name: Application CI/CD
 
 on:
   push:
@@ -6,18 +6,75 @@ on:
     paths:
       - 'frontend/**'
       - 'backend/**'
+      - 'docker-compose.yml'
       - '.github/workflows/application.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+  AWS_DEPLOY_ENABLED: ${{ vars.AWS_DEPLOY_ENABLED || 'false' }}
+  ENVIRONMENT: ${{ vars.ENVIRONMENT || 'dev' }}
 
 jobs:
-  test-and-build:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Validate backend syntax
         run: python -m py_compile backend/app.py
-      - name: Build backend image
-        run: docker build -t coditude-backend:ci backend
-      - name: Build frontend image
-        run: docker build -t coditude-frontend:ci frontend
 
-  # Cloud deployment will be added after the AWS infrastructure is validated.
+      - name: Build backend image
+        run: docker build -t coditude-backend:${{ github.sha }} backend
+
+      - name: Build frontend image
+        run: docker build -t coditude-frontend:${{ github.sha }} frontend
+
+  publish-and-deploy:
+    needs: test
+    if: ${{ vars.AWS_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    environment: ${{ vars.ENVIRONMENT || 'dev' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+
+      - name: Trigger AWS CodeBuild validation
+        run: |
+          aws codebuild start-build \
+            --project-name coditude-${ENVIRONMENT}-build \
+            --source-version "${GITHUB_SHA}"
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push backend
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          docker build -t "$REGISTRY/coditude/${ENVIRONMENT}/backend:${GITHUB_SHA}" backend
+          docker push "$REGISTRY/coditude/${ENVIRONMENT}/backend:${GITHUB_SHA}"
+
+      - name: Build and push frontend
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          docker build -t "$REGISTRY/coditude/${ENVIRONMENT}/frontend:${GITHUB_SHA}" frontend
+          docker push "$REGISTRY/coditude/${ENVIRONMENT}/frontend:${GITHUB_SHA}"
+
+      - name: Deploy application images only
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          ENVIRONMENT: ${{ env.ENVIRONMENT }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: ./scripts/deploy-ecs.sh

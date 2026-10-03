@@ -1,0 +1,62 @@
+name: Non-Containerized Application Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+        default: dev
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+  AWS_DEPLOY_ENABLED: ${{ vars.AWS_DEPLOY_ENABLED || 'false' }}
+
+jobs:
+  package-and-deploy:
+    if: ${{ vars.AWS_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+
+      - name: Package frontend and backend
+        run: |
+          mkdir -p dist/frontend dist/backend
+          tar --exclude=node_modules --exclude=.next -czf dist/frontend/current.tar.gz frontend
+          tar --exclude=__pycache__ -czf dist/backend/current.tar.gz backend
+
+      - name: Find artifact bucket
+        id: bucket
+        run: |
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name coditude-ec2-${{ inputs.environment }} \
+            --query "Stacks[0].Outputs[?OutputKey=='ArtifactBucketName'].OutputValue" \
+            --output text)
+          echo "name=$BUCKET" >> "$GITHUB_OUTPUT"
+
+      - name: Upload application artifacts
+        run: |
+          aws s3 cp dist/frontend/current.tar.gz s3://${{ steps.bucket.outputs.name }}/releases/frontend/current.tar.gz
+          aws s3 cp dist/backend/current.tar.gz s3://${{ steps.bucket.outputs.name }}/releases/backend/current.tar.gz
+
+      - name: Refresh EC2 application instances
+        run: |
+          aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name coditude-${{ inputs.environment }}-frontend-asg \
+            --preferences MinHealthyPercentage=100,InstanceWarmup=120 || true
+          aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name coditude-${{ inputs.environment }}-backend-asg \
+            --preferences MinHealthyPercentage=100,InstanceWarmup=120 || true

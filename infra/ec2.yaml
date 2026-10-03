@@ -1,0 +1,281 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Alternative non-containerized deployment using EC2 Auto Scaling Groups.
+  This stack is intentionally separate from the ECS deployment so the two
+  deployment approaches can be evaluated independently.
+
+Parameters:
+  AppEnvironment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  NetworkStackName:
+    Type: String
+
+  DatabaseStackName:
+    Type: String
+    Description: Database stack name for PostgreSQL secret and endpoint imports.
+
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: Amazon Linux 2023 AMI ID for the target region.
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+
+  KeyName:
+    Type: String
+    Default: ''
+    Description: Optional SSH key for troubleshooting. Prefer SSM in production.
+
+  FrontendArtifactKey:
+    Type: String
+    Default: releases/frontend/current.tar.gz
+
+  BackendArtifactKey:
+    Type: String
+    Default: releases/backend/current.tar.gz
+
+  DatabaseSecretArn:
+    Type: String
+    Description: PostgreSQL secret ARN exported by the database stack.
+
+  DatabaseEndpoint:
+    Type: String
+    Description: PostgreSQL endpoint exported by the database stack.
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, '']]
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldArtifacts
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub coditude-${AppEnvironment}-ec2-instance
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadApplicationArtifacts
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub ${ArtifactBucket.Arn}/releases/*
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  Fn::ImportValue:
+                    Fn::Sub: ${DatabaseStackName}-DatabaseSecretArn
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref EC2InstanceRole]
+
+  NonContainerAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub coditude-${AppEnvironment}-ec2-alb
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - Fn::ImportValue:
+            Fn::Sub: ${NetworkStackName}-AlbSecurityGroupId
+      Subnets:
+        - Fn::ImportValue:
+            Fn::Sub: ${NetworkStackName}-PublicSubnetA
+        - Fn::ImportValue:
+            Fn::Sub: ${NetworkStackName}-PublicSubnetB
+
+  FrontendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: instance
+      Port: 3000
+      Protocol: HTTP
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: ${NetworkStackName}-VpcId
+      HealthCheckPath: /
+
+  BackendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: instance
+      Port: 8000
+      Protocol: HTTP
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: ${NetworkStackName}-VpcId
+      HealthCheckPath: /health
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref NonContainerAlb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref FrontendTargetGroup
+
+  BackendRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: ['/api/*']
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
+
+  FrontendLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
+        IamInstanceProfile:
+          Name: !Ref EC2InstanceProfile
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              Fn::Sub: ${NetworkStackName}-ApplicationSecurityGroupId
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            dnf update -y
+            dnf install -y nodejs npm awscli2 jq
+            mkdir -p /opt/coditude/frontend
+            aws s3 cp 's3://${ArtifactBucket}/${FrontendArtifactKey}' /tmp/frontend.tar.gz
+            tar -xzf /tmp/frontend.tar.gz -C /opt/coditude/frontend
+            cd /opt/coditude/frontend
+            npm install --omit=dev
+            npm run build
+            npm run start -- --hostname 0.0.0.0 --port 3000 > /var/log/coditude-frontend.log 2>&1 &
+
+  BackendLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
+        IamInstanceProfile:
+          Name: !Ref EC2InstanceProfile
+        SecurityGroupIds:
+          - Fn::ImportValue:
+              Fn::Sub: ${NetworkStackName}-ApplicationSecurityGroupId
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            dnf update -y
+            dnf install -y python3 awscli2 jq
+            mkdir -p /opt/coditude/backend
+            aws s3 cp 's3://${ArtifactBucket}/${BackendArtifactKey}' /tmp/backend.tar.gz
+            tar -xzf /tmp/backend.tar.gz -C /opt/coditude/backend
+            cd /opt/coditude/backend
+            python3 -m venv .venv
+            .venv/bin/pip install -r requirements.txt
+            SECRET_JSON=$(aws secretsmanager get-secret-value \
+              --secret-id '${DatabaseSecretArn}' \
+              --query SecretString --output text)
+            export DATABASE_HOST='${DatabaseEndpoint}'
+            export DATABASE_PORT=5432
+            export DATABASE_USER=$(echo "$SECRET_JSON" | jq -r .username)
+            export DATABASE_PASSWORD=$(echo "$SECRET_JSON" | jq -r .password)
+            export DATABASE_NAME=$(echo "$SECRET_JSON" | jq -r .dbname)
+            export APP_ENV='${AppEnvironment}'
+            .venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000 > /var/log/coditude-backend.log 2>&1 &
+
+  FrontendAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub coditude-${AppEnvironment}-frontend-asg
+      MinSize: 1
+      MaxSize: 4
+      DesiredCapacity: 1
+      VPCZoneIdentifier:
+        - Fn::ImportValue:
+            Fn::Sub: ${NetworkStackName}-PrivateSubnetA
+        - Fn::ImportValue:
+            Fn::Sub: ${NetworkStackName}-PrivateSubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref FrontendLaunchTemplate
+        Version: !GetAtt FrontendLaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref FrontendTargetGroup
+      HealthCheckType: ELB
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-frontend-ec2
+          PropagateAtLaunch: true
+
+  BackendAsg:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub coditude-${AppEnvironment}-backend-asg
+      MinSize: 1
+      MaxSize: 4
+      DesiredCapacity: 1
+      VPCZoneIdentifier:
+        - Fn::ImportValue:
+            Fn::Sub: ${NetworkStackName}-PrivateSubnetA
+        - Fn::ImportValue:
+            Fn::Sub: ${NetworkStackName}-PrivateSubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BackendLaunchTemplate
+        Version: !GetAtt BackendLaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref BackendTargetGroup
+      HealthCheckType: ELB
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-backend-ec2
+          PropagateAtLaunch: true
+
+Outputs:
+  LoadBalancerDNS:
+    Description: Non-containerized application endpoint.
+    Value: !GetAtt NonContainerAlb.DNSName
+
+  ArtifactBucketName:
+    Description: S3 bucket used for versioned application artifacts.
+    Value: !Ref ArtifactBucket

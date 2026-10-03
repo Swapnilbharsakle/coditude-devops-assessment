@@ -1,0 +1,18 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+      nodejs: 20
+  pre_build:
+    commands:
+      - python --version
+      - node --version
+      - python -m py_compile backend/app.py
+      - cd frontend && npm install && cd ..
+  build:
+    commands:
+      - docker build -t coditude-backend:ci backend
+      - docker build -t coditude-frontend:ci frontend
+

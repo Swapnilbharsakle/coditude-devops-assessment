@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: PostgreSQL RDS foundation for the Coditude DevOps assessment.
+
+Parameters:
+  AppEnvironment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+
+  NetworkStackName:
+    Type: String
+    Description: Name of the CloudFormation stack created from infra/network.yaml.
+
+  DBName:
+    Type: String
+    Default: appdb
+    AllowedPattern: '^[a-zA-Z][a-zA-Z0-9]*$'
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters.
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+    Description: Use a larger class for production workloads after load testing.
+
+  AllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 1000
+
+Resources:
+  DatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub PostgreSQL credentials for coditude ${AppEnvironment} environment.
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username":"coditude_admin","dbname":"${DBName}"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\\'
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-database-secret
+        - Key: Environment
+          Value: !Ref AppEnvironment
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub Private subnets for coditude ${AppEnvironment} PostgreSQL.
+      SubnetIds:
+        - Fn::ImportValue:
+            Fn::Sub: ${NetworkStackName}-PrivateSubnetA
+        - Fn::ImportValue:
+            Fn::Sub: ${NetworkStackName}-PrivateSubnetB
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-db-subnet-group
+        - Key: Environment
+          Value: !Ref AppEnvironment
+
+  PostgreSQL:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBName: !Ref DBName
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref AllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      Engine: postgres
+      MultiAZ: true
+      PubliclyAccessible: false
+      Port: 5432
+      BackupRetentionPeriod: 7
+      CopyTagsToSnapshot: true
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: false
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - Fn::ImportValue:
+            Fn::Sub: ${NetworkStackName}-DatabaseSecurityGroupId
+      MasterUsername: !Sub '{{resolve:secretsmanager:${DatabaseSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DatabaseSecret}:SecretString:password}}'
+      Tags:
+        - Key: Name
+          Value: !Sub coditude-${AppEnvironment}-postgres
+        - Key: Environment
+          Value: !Ref AppEnvironment
+        - Key: Project
+          Value: coditude-devops-assessment
+
+Outputs:
+  DBEndpoint:
+    Description: PostgreSQL endpoint hostname.
+    Value: !GetAtt PostgreSQL.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-DBEndpoint
+
+  DBPort:
+    Description: PostgreSQL port.
+    Value: !GetAtt PostgreSQL.Endpoint.Port
+
+  DBName:
+    Description: Application database name.
+    Value: !Ref DBName
+
+  DatabaseSecretArn:
+    Description: Secrets Manager ARN containing database credentials.
+    Value: !Ref DatabaseSecret
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseSecretArn
