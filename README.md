@@ -41,7 +41,7 @@ infra/github-oidc.yaml            GitHub Actions OIDC IAM role
 .github/workflows/non-containerized-deployment.yml EC2 app deployment
 scripts/deploy-ecs.sh             ECS rolling deployment helper
 docker-compose.yml                Local frontend/backend/PostgreSQL stack
-docs/                             Architecture, deployment, security, rollback
+docs/                             Architecture, deployment, security, rollback, aws-iam-oidc-secrets.md
 ```
 
 ## Local validation
